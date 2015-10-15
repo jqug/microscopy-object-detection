@@ -1,0 +1,8 @@
+on laptop:
+ssh -N -f -L localhost:8080:localhost:7000 -i ~/.ssh/airdev.pem ubuntu@ip
+
+
+on server:
+~/anaconda/bin/ipython notebook --no-browser --port=7000
+
+
