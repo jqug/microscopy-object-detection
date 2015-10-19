@@ -1,0 +1,14 @@
+net: "train_val_full.prototxt"
+test_iter: 500
+test_interval: 5000
+base_lr: 0.01
+lr_policy: "step"
+gamma: 0.1
+stepsize: 100000
+display: 500
+max_iter: 500000
+momentum: 0.9
+weight_decay: 0.0005
+snapshot: 5000
+snapshot_prefix: "malarianet_train"
+solver_mode: GPU
