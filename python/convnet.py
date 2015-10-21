@@ -1,18 +1,20 @@
 import caffe
 import numpy as np
 import glob
+import subprocess
 
 class ConvNetClassifier(caffe.Net):
 
     def __init__(self, opts):
                      
-        model_file = '%s%s/deploy_data.prototxt' % (opts['model_dir'], opts['model'])
-        pretrained_file = glob.glob('%s%s/*.caffemodel' % (opts['model_dir'], opts['model']))[0]
-        mean = opts['mean']
+        self.opts = opts
+        model_file = '%s%s/deploy_data.prototxt' % (opts['models_dir'], opts['model'])
+        pretrained_file = glob.glob('%s%s/*.caffemodel' % (opts['models_dir'], opts['model']))[0]
+        '''mean = opts['mean']
         raw_scale = opts['raw_scale']
         input_scale = opts['input_scale']
         image_dims = opts['image_dims']
-        channel_swap = opts['channel_swap']
+        channel_swap = opts['channel_swap']'''
         
         caffe.Net.__init__(self, model_file, pretrained_file, caffe.TEST)
 
@@ -21,19 +23,19 @@ class ConvNetClassifier(caffe.Net):
         self.transformer = caffe.io.Transformer(
             {in_: self.blobs[in_].data.shape})
         self.transformer.set_transpose(in_, (2, 0, 1))
-        if mean is not None:
-            self.transformer.set_mean(in_, mean)
-        if input_scale is not None:
-            self.transformer.set_input_scale(in_, input_scale)
-        if raw_scale is not None:
-            self.transformer.set_raw_scale(in_, raw_scale)
-        if channel_swap is not None:
-            self.transformer.set_channel_swap(in_, channel_swap)
+        if opts['mean'] is not None:
+            self.transformer.set_mean(in_, opts['mean'])
+        if opts['input_scale'] is not None:
+            self.transformer.set_input_scale(in_, opts['input_scale'])
+        if opts['raw_scale'] is not None:
+            self.transformer.set_raw_scale(in_, opts['raw_scale'])
+        if opts['channel_swap'] is not None:
+            self.transformer.set_channel_swap(in_, opts['channel_swap'])
 
         self.crop_dims = np.array(self.blobs[in_].data.shape[2:])
-        if not image_dims:
+        if not opts['image_dims']:
             image_dims = self.crop_dims
-        self.image_dims = image_dims
+        self.image_dims = opts['image_dims']
 
     def predict(self, inputs, oversample=True):
         
@@ -82,3 +84,16 @@ class ConvNetClassifier(caffe.Net):
             predictions = predictions.mean(1)
 
         return predictions
+        
+
+        
+    def train(self):
+        def _execute(command, workingdir):    
+            popen = subprocess.Popen(command, stderr=subprocess.PIPE, cwd=workingdir)
+            lines_iterator = iter(popen.stderr.readline, b"")
+            for line in lines_iterator:
+                print(line[:-1]) # yield line
+        # Caffe must be on the system path
+        wd = '%s%s' % (self.opts['models_dir'], self.opts['model'])
+        print wd
+        _execute(["caffe", "train", "--solver=solver.prototxt"], workingdir=wd)

@@ -10,11 +10,34 @@ import caffe
 from skimage import io
 import cPickle as pickle
 import cv2
+from caffe.proto import caffe_pb2
 
-def create_sets(img_dir, train_set_proportion=.6, test_set_proportion=.2):
+
+def load_db(db_dir):
+    lmdb_env = lmdb.open(db_dir)
+    lmdb_txn = lmdb_env.begin()
+    lmdb_cursor = lmdb_txn.cursor()
+    datum = caffe_pb2.Datum()
+    
+    X = []
+    y = []
+    
+    for key, value in lmdb_cursor:
+        datum.ParseFromString(value)
+        label = datum.label
+        data = caffe.io.datum_to_array(datum)
+        y.append(label)
+        X.append(data[0,:,:].ravel())
+        
+    y = np.array(y).astype(int)
+    X = np.array(X)
+    
+    return X, y
 
 
-    val_set_proportion = 1 - train_set_proportion - test_set_proportion
+def create_sets(img_dir, train_set_proportion=.6, test_set_proportion=.2, val_set_proportion=.2):
+
+    #val_set_proportion = 1 - train_set_proportion - test_set_proportion
 
     if os.path.isfile(img_dir+ 'imgs.list'):
         baseimgfilenames = pickle.load(open(img_dir+'imgs.list','rb'))
@@ -28,14 +51,42 @@ def create_sets(img_dir, train_set_proportion=.6, test_set_proportion=.2):
                                        random_state=1)  
 
     train_test_prop = train_set_proportion + test_set_proportion
-    train,test = train_test_split(train,                                     train_size=train_set_proportion/train_test_prop,                                       test_size=test_set_proportion/train_test_prop,
-                                       random_state=1)  
+    train,test = train_test_split(train,                                     
+                                  train_size=train_set_proportion/train_test_prop,                                       
+                                  test_size=test_set_proportion/train_test_prop,
+                                  random_state=1)  
 
     trainfiles = [baseimgfilenames[i] for i in train]
     valfiles = [baseimgfilenames[i] for i in val]
     testfiles = [baseimgfilenames[i] for i in test]
     
     return trainfiles, valfiles,testfiles
+    
+    
+def write_db(trainfiles, valfiles, testfiles, opts):
+    print 'Creating training set'
+    train_y, train_X = create_patches_at_center(trainfiles, opts['annotation_dir'], 
+                                                    opts['img_dir'], opts['image_dims'][0], 40,grayscale=True)
+    if opts['augment-training-data']:
+        a_x,a_y = augment(train_X, train_y)
+        tolmdb(a_x, a_y, opts['train-dir'])
+    else:
+        x,y = balance(train_X, train_y)    
+        tolmdb(x, y, opts['train-dir'])
+        
+        
+    print '\nCreating validation set'
+    val_y, val_X = create_patches_at_center(valfiles, opts['annotation_dir'], 
+                                                opts['img_dir'], opts['image_dims'][0], 40,grayscale=True)
+    x,y = balance(val_X, val_y)
+    tolmdb(x, y, opts['val-dir'])
+    
+    
+    print '\nCreating test set'
+    test_y,test_X = create_patches_at_center(testfiles, opts['annotation_dir'], 
+                                                 opts['img_dir'], opts['image_dims'][0], 40,grayscale=True)
+    x,y = balance(test_X, test_y)
+    tolmdb(x, y, opts['test-dir'])
 
 
 def get_patch_labels_for_single_image(img_filename, image_dir,annotation_dir, size, step):
@@ -150,9 +201,16 @@ def get_image_positives(img, boundingboxes, size):
     return pos
 
 
-def create_patches_at_center(img_basenames, annotation_dir, image_dir, size=50,step=40, grayscale=True):
+def create_patches_at_center(img_basenames, annotation_dir, image_dir, size=50, step=40, grayscale=True, progressbar=True):
     
-    pb = ProgressBar(len(img_basenames))
+    if progressbar:
+        pb = ProgressBar(len(img_basenames))
+        
+    if not annotation_dir[-1] == os.path.sep:
+        annotation_dir = annotation_dir + os.path.sep
+        
+    if not image_dir[-1] == os.path.sep:
+        image_dir = image_dir + os.path.sep        
     
     color_type = 0
     
@@ -166,7 +224,8 @@ def create_patches_at_center(img_basenames, annotation_dir, image_dir, size=50,s
     neg = []
     s = 1
     for img_filename in img_basenames:
-        pb.step(s)
+        if progressbar:
+            pb.step(s)
         s +=1
         annotation_filename = annotation_dir + img_filename[:-3] + 'xml'
         boundingboxes = get_bounding_boxes_for_single_image(annotation_filename)
@@ -180,12 +239,13 @@ def create_patches_at_center(img_basenames, annotation_dir, image_dir, size=50,s
 	img = np.rollaxis(img,2)
         image_pos = get_image_positives(img,boundingboxes, size)
         pos.append(image_pos)
-    
+
         image_neg = get_image_negatives(img, boundingboxes,size,step)
         neg.append(image_neg)
     
     
     pos = [item for sublist in pos for item in sublist]
+    
     
     neg = [item for sublist in neg for item in sublist]
     patches = pos+neg    
@@ -327,7 +387,7 @@ def tolmdb(X,y,dbname):
 
 
 # Returns an array with all the positive samples and as many negatives as mult_neg*#pos
-def balance(X,y,mult_neg=2):
+def balance(X,y,mult_neg=10):
     np.random.seed(0)
     neg = np.where(y==0)[0]
     neg_count = len(neg)
@@ -343,7 +403,7 @@ def balance(X,y,mult_neg=2):
 
 
 #rotations
-def augmentate(X,y):
+def augment(X,y):
     
     shape = X.shape
     num_org=shape[0]

@@ -8,17 +8,21 @@ from skimage.morphology import watershed
 import skimage.measure as measure
 import skimage.segmentation as segmentation
 import scipy.ndimage as ndimage
+import sklearn
 
 MAX = 0
 MEAN = 1
 AREA = 2
 NUM = 3
 
-def detect(imfile, net, opts):
-    p = network_predict(net, imfile)
+def detect(imfile, clf, opts):
+    if type(clf)==sklearn.ensemble.forest.ExtraTreesClassifier:
+        p = tree_predict(clf, imfile)
+    else:
+        p = network_predict(clf, imfile)
     boxes = get_boxes(imfile, probs=p, gauss=opts['gauss'], threshold=opts['threshold'] )
     found = nms_felz(boxes, lim=opts['lim'], prob = opts['prob'], pos = opts['pos'], 
-                    overlapThresh=opts['overlapThreshold'], probs=p,probs_area = opts['probs_area'], step = opts['step'])
+                    overlapThresh=opts['overlapThreshold'], probs=p,probs_area = opts['probs_area'], step = opts['detection-step'])
     return found
     
 def network_get_prob(patches, classifier, oversample=True):
@@ -27,7 +31,7 @@ def network_get_prob(patches, classifier, oversample=True):
   
     return classifier.predict(patches, oversample)
 
-def tree_get_prob(patches, classifier, oversample=True):
+def tree_morph_features_get_prob(patches, classifier, oversample=True):
 
     feats = []
     
@@ -41,7 +45,21 @@ def tree_get_prob(patches, classifier, oversample=True):
 
     p = np.vstack(feats)
     return classifier.predict_proba(p)[:,1]
+    
+def tree_get_prob(patches, classifier, oversample=True):
 
+    feats = []
+    
+    for patch in patches:
+        feats.append(patch.ravel()*255)
+
+    p = np.vstack(feats)
+
+    pred = classifier.predict_proba(p) 
+    #print 'max pixel: %.2f' % (np.max(feats[0]))
+    #print min(pred[:,1])
+    return pred    
+    
      
 def network_predict(net, img_filename, step=5, size=50, oversample=True, norm=False):
     return    predict(net, network_get_prob, img_filename, step, size, oversample, norm)
@@ -92,6 +110,8 @@ def predict(classifier, predict_func, img_filename, step=5, size=50, oversample=
                     x += step
                 y += step
 
+    #p = img[top:bottom, left:right,1]
+    #print p.shape
     return probs
 
 
