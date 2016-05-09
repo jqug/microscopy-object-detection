@@ -37,14 +37,14 @@ def create_sets(img_dir, train_set_proportion=.6, test_set_proportion=.2, val_se
 
     return trainfiles, valfiles,testfiles
 
-def get_patch_labels_for_single_image(img_filename, image_dir,annotation_dir, size, step,width, height):
+def get_patch_labels_for_single_image(img_filename, image_dir,annotation_dir, size, step,width, height, objectclass=None):
     '''
     Read the XML annotation files to get the labels of each patch for a
     given image. The labels are 0 if there is no object in the corresponding
     patch, and 1 if an object is present.
     '''
     annotation_filename = annotation_dir + img_filename[:-3] + 'xml'
-    boundingboxes = get_bounding_boxes_for_single_image(annotation_filename)
+    boundingboxes = get_bounding_boxes_for_single_image(annotation_filename, objectclass=objectclass)
 
     # Scan through patch locations in the image
     labels = []
@@ -108,34 +108,35 @@ def get_image_negatives(img, boundingboxes, size, step, grayscale=False,downsamp
     max_x /= step
     max_y /= step
 
-    pos= []
+    neg = []
     y = (height-(max_y * step))/2
     while y+(size) < height:
             #rows
             x = (width-(max_x * step))/2
 
             while (x+(size) < width):
-                left = x
-                right = x+(size)
-                top = y
-                bottom = y+(size)
+                if np.random.rand()>discard_rate:
+                    left = x
+                    right = x+(size)
+                    top = y
+                    bottom = y+(size)
 
-                is_pos=False
-                for bb in boundingboxes:
-                    if overlap([left,right,top,bottom], bb):
-                        is_pos=True
-                        break
+                    is_pos=False
+                    for bb in boundingboxes:
+                        if overlap([left,right,top,bottom], bb):
+                            is_pos=True
+                            break
 
-                if not is_pos and np.random.rand()>discard_rate:
-                    patch = img[..., top:bottom, left:right]
-                    pos.append(patch[:,::downsample,::downsample])
+                    if not is_pos:
+                        #patch = img[:, top:bottom:downsample, left:right:downsample]
+                        #neg.append(patch[:,::downsample,::downsample])
+                        patch = img[:, top:bottom:downsample, left:right:downsample]
+                        neg.append(patch.copy())  # without copy seems to leak memory
 
                 x += step
             y += step
 
-
-
-    return pos
+    return neg
 
 def get_image_positives(img, boundingboxes, size, downsample=1):
     '''Positive-labelled patches, centred on annotated bounding boxes.'''
@@ -145,14 +146,14 @@ def get_image_positives(img, boundingboxes, size, downsample=1):
         cx = (bb[2] + (bb[3]-bb[2])/2)
         patch =  img[..., cx-size/2:cx+size/2,cy-size/2:cy+size/2]
         s= patch.shape
-        #print s
         if s[1]<size or s[2]<size:
             continue
-        pos.append(patch[:,::downsample,::downsample])
+        patch = patch[:,::downsample,::downsample]
+        pos.append(patch.copy())
     return pos
 
 
-def create_patches_at_center(img_basenames, annotation_dir, image_dir, size=50, step=40, grayscale=True, progressbar=True,downsample=1):
+def create_patches_at_center(img_basenames, annotation_dir, image_dir, size=50, step=40, grayscale=True, progressbar=True,downsample=1, objectclass=None, negative_discard_rate=.9):
     '''Extract a set of image patches with labels, from the supplied list of
     annotated images. Positive-labelled patches are extracted centered on the
     annotated bounding box; negative-lablled patches are extracted at random
@@ -182,35 +183,20 @@ def create_patches_at_center(img_basenames, annotation_dir, image_dir, size=50, 
             pb.step(s)
         s +=1
         annotation_filename = annotation_dir + img_filename[:-3] + 'xml'
-        boundingboxes = get_bounding_boxes_for_single_image(annotation_filename)
+        boundingboxes = get_bounding_boxes_for_single_image(annotation_filename, objectclass)
         colortype = cv2.IMREAD_COLOR
-        if grayscale:
-            colortype = cv2.IMREAD_GRAYSCALE
-            img = cv2.imread(image_dir + img_filename, colortype)
-            height,width=img.shape
-            img = img.reshape((height, width,channels))
-            img = np.rollaxis(img,2)
-            image_pos = get_image_positives(img,boundingboxes, size)
-            pos.append(image_pos)
 
-            image_neg = get_image_negatives(img, boundingboxes,size,step)
-            neg.append(image_neg)
+        img = cv2.imread(image_dir + img_filename, colortype)
+        height,width,channels=img.shape
+        img = img.reshape((height, width,channels))
+        img = np.rollaxis(img,2)
+        image_pos = get_image_positives(img,boundingboxes,size,downsample=downsample)
+        pos.append(image_pos)
 
-        else:
-            img = cv2.imread(image_dir + img_filename, colortype)
-            height,width,channels=img.shape
-            img = img.reshape((height, width,channels))
-            img = np.rollaxis(img,2)
-            image_pos = get_image_positives(img,boundingboxes, size,downsample=downsample)
-            pos.append(image_pos)
-            #print len(pos)
-            image_neg = get_image_negatives(img, boundingboxes,size,step,downsample=downsample)
-            neg.append(image_neg)
-            #print len(neg)
+        image_neg = get_image_negatives(img,boundingboxes,size,step,downsample=downsample,discard_rate=negative_discard_rate)
+        neg.append(image_neg)
 
     pos = [item for sublist in pos for item in sublist]
-
-
     neg = [item for sublist in neg for item in sublist]
     patches = pos+neg
 
@@ -220,7 +206,6 @@ def create_patches_at_center(img_basenames, annotation_dir, image_dir, size=50, 
 
     np_patches = np.empty((len(patches),channels,size/downsample,size/downsample),dtype=np.uint8)
     np_labels = np.empty(len(patches),dtype=int)
-
 
     max_pos=len(pos)
     for i,j in zip(index,xrange(len(index))):
@@ -384,7 +369,7 @@ def augment_positives(X,y):
     return aug_X, aug_y
 
 
-def get_bounding_boxes_for_single_image(filename):
+def get_bounding_boxes_for_single_image(filename, objectclass=None):
     '''
     Given an annotation XML filename, get a list of the bounding boxes around
     each object (the ground truth object locations).
@@ -395,29 +380,21 @@ def get_bounding_boxes_for_single_image(filename):
 
     if (file_exists):
         # Read the bounding boxes from xml annotation
-
         tree = etree.parse(filename)
         r = tree.xpath('//bndbox')
 
-        bad = tree.xpath('//status/bad')
-        badimage = (bad[0].text=='1')
-        '''
-        if badimage:
-            print 'Bad image: ' + filename
-            exit
-        '''
-
         if (len(r) != 0):
             for i in range(len(r)):
-                xmin = round(float(r[i].xpath('xmin')[0].text))
-                xmin = max(xmin,1)
-                xmax = round(float(r[i].xpath('xmax')[0].text))
-                ymin = round(float(r[i].xpath('ymin')[0].text))
-                ymin = max(ymin,1)
-                ymax = round(float(r[i].xpath('ymax')[0].text))
-                xmin, xmax, ymin, ymax = int(xmin),int(xmax),int(ymin),int(ymax)
+                if (objectclass==None) or (objectclass in r[i].getparent().xpath('label')[0].text.lower()):
+                    xmin = round(float(r[i].xpath('xmin')[0].text))
+                    xmin = max(xmin,1)
+                    xmax = round(float(r[i].xpath('xmax')[0].text))
+                    ymin = round(float(r[i].xpath('ymin')[0].text))
+                    ymin = max(ymin,1)
+                    ymax = round(float(r[i].xpath('ymax')[0].text))
+                    xmin, xmax, ymin, ymax = int(xmin),int(xmax),int(ymin),int(ymax)
 
-                boundingboxes.append((xmin,xmax,ymin,ymax))
+                    boundingboxes.append((xmin,xmax,ymin,ymax))
 
     if len(boundingboxes) == 0:
         return np.array([])
