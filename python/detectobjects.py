@@ -1,85 +1,31 @@
 #import caffe
 import numpy as np
 import  skimage.filters as filters
-import shapefeatures
-from skimage.feature import peak_local_max
-from skimage.feature import corner_peaks
-from skimage.morphology import watershed
-import skimage.measure as measure
-import skimage.segmentation as segmentation
-import scipy.ndimage as ndimage
-import sklearn
-import sklearn.ensemble
+#import shapefeatures
+#from skimage.feature import peak_local_max
+#from skimage.feature import corner_peaks
+#from skimage.morphology import watershed
+#import skimage.measure as measure
+#import skimage.segmentation as segmentation
+#import scipy.ndimage as ndimage
+#import sklearn
+#import sklearn.ensemble
 from scipy import misc
 
-MAX = 0
-MEAN = 1
-AREA = 2
-NUM = 3
 
 def detect(imfile, clf, opts):
-    step = opts['detection-step']
+    step = opts['detection_step']
     downsample = opts['image_downsample']
-    size = opts['image_dims'][0]
+    size = opts['patch_size'][0]
 
-    if type(clf)==sklearn.ensemble.forest.ExtraTreesClassifier:
-        p = predict(clf, tree_get_prob, imfile, step, size, downsample)
-    else:
-        p = predict(clf, network_get_prob, imfile, step, size, downsample)
+    p = predict(clf, imfile, step, size, downsample)
 
-    boxes = get_boxes(imfile, p, step, size, gauss=opts['gauss'], threshold=opts['threshold'] )
+    boxes = get_boxes(imfile, p, step, size, gauss=opts['gauss'], threshold=opts['detection_probability_threshold'] )
 
-    #found = nms_felz(boxes, lim=opts['lim'], prob = opts['prob'], pos = opts['pos'],
-    #                overlapThresh=opts['overlapThreshold'], probs=p,probs_area = opts['probs_area'], step = opts['detection-step'])
-
-    found = nms_felz(boxes, step, size, lim=opts['lim'], prob = opts['prob'], pos = opts['pos'],
-                    overlapThresh=opts['overlapThreshold'], probs=p, probs_area=opts['probs_area'])
+    found = non_maximum_suppression(boxes, overlapThresh=opts['detection_overlap_threshold'])
     return found
 
-def network_get_prob(patches, classifier, oversample=True):
-    p = np.array(patches)
-    p = np.swapaxes(p,1,3)
-    p = np.swapaxes(p,2,3)
-    return classifier.predict_proba(p)
-
-def tree_morph_features_get_prob(patches, classifier, oversample=True):
-
-    feats = []
-
-    featureset = [3,7,11,12,15,17]
-    filters = [[11,'>',1000]]
-    centiles = [0,25,50,75,100]
-    print patches[0].shape
-
-    for patch in patches:
-        feats.append(shapefeatures.extract(patch, featureset, filters, centiles))
-
-    p = np.vstack(feats)
-    return classifier.predict_proba(p)[:,1]
-
-def tree_get_prob(patches, classifier, downsample=1):
-
-    feats = []
-
-    for patch in patches:
-        feats.append(patch[::downsample,::downsample,:].ravel()*255)
-
-    p = np.vstack(feats)
-
-    pred = classifier.predict_proba(p)
-    #print 'max pixel: %.2f' % (np.max(feats[0]))
-    #print min(pred[:,1])
-    return pred
-
-
-def network_predict(net, img_filename, opts, step, size):
-    return    predict(net, network_get_prob, img_filename, step, size, oversample, norm)
-
-def tree_predict(classifier, img_filename, step, size):
-    return    predict(classifier, tree_get_prob, img_filename, step, size, oversample)
-
-def predict(classifier, predict_func, img_filename, step, size, downsample=1):
-    #img = caffe.io.load_image(img_filename)
+def predict(classifier, img_filename, step, size, downsample=1):
     img = misc.imread(img_filename)
     height, width,channels = img.shape
 
@@ -96,11 +42,15 @@ def predict(classifier, predict_func, img_filename, step, size, downsample=1):
                     right = x+(size)
                     top = y
                     bottom = y+(size)
-                    patches.append(img[top:bottom:downsample, left:right:downsample,[2,1,0]])
+                    patches.append(img[top:bottom:downsample, left:right:downsample,:])
                     x += step
                 y += step
 
-    predictions = predict_func(patches, classifier)
+    p = np.array(patches)
+    p = np.swapaxes(p,1,3)
+    p = np.swapaxes(p,2,3)
+    predictions = classifier.predict_proba(p)
+    
     i=0
     y=0
     while y+(size) < height:
@@ -115,8 +65,6 @@ def predict(classifier, predict_func, img_filename, step, size, downsample=1):
                     x += step
                 y += step
 
-    #p = img[top:bottom, left:right,1]
-    #print p.shape
     return probs
 
 
@@ -124,8 +72,7 @@ def get_boxes(img_filename, probs, step, size, gauss=0,threshold=0.5):
 
     if gauss != 0:
         probs = filters.gaussian_filter(probs, gauss)
-
-
+        
     img = misc.imread(img_filename)
     height, width,channels = img.shape
 
@@ -153,6 +100,65 @@ def get_boxes(img_filename, probs, step, size, gauss=0,threshold=0.5):
     return boxes
 
 
+# Malisiewicz et al.
+# Python port by Adrian Rosebrock
+def non_maximum_suppression(boxes, overlapThresh=0.5):
+  # if there are no boxes, return an empty list
+  if len(boxes) == 0:
+    return []
+
+  # if the bounding boxes integers, convert them to floats --
+  # this is important since we'll be doing a bunch of divisions
+  if boxes.dtype.kind == "i":
+    boxes = boxes.astype("float")
+
+  # initialize the list of picked indexes 
+  pick = []
+
+  # grab the coordinates of the bounding boxes
+  x1 = boxes[:,0]
+  y1 = boxes[:,1]
+  x2 = boxes[:,2]
+  y2 = boxes[:,3]
+  scores = boxes[:,4]
+  # compute the area of the bounding boxes and sort the bounding
+  # boxes by the score/probability of the bounding box
+  area = (x2 - x1 + 1) * (y2 - y1 + 1)
+  idxs = np.argsort(scores)[::-1]
+
+  # keep looping while some indexes still remain in the indexes
+  # list
+  while len(idxs) > 0:
+    # grab the last index in the indexes list and add the
+    # index value to the list of picked indexes
+    last = len(idxs) - 1
+    i = idxs[last]
+    pick.append(i)
+
+    # find the largest (x, y) coordinates for the start of
+    # the bounding box and the smallest (x, y) coordinates
+    # for the end of the bounding box
+    xx1 = np.maximum(x1[i], x1[idxs[:last]])
+    yy1 = np.maximum(y1[i], y1[idxs[:last]])
+    xx2 = np.minimum(x2[i], x2[idxs[:last]])
+    yy2 = np.minimum(y2[i], y2[idxs[:last]])
+
+    # compute the width and height of the bounding box
+    w = np.maximum(0, xx2 - xx1 + 1)
+    h = np.maximum(0, yy2 - yy1 + 1)
+
+    # compute the ratio of overlap
+    overlap = (w * h) / area[idxs[:last]]
+
+    # delete all indexes from the index list that have
+    idxs = np.delete(idxs, np.concatenate(([last],
+      np.where(overlap > overlapThresh)[0])))
+
+  # return only the bounding boxes that were picked using the
+  # integer data type
+  return boxes[pick].astype("int")
+
+'''
 def nms_felz(boxes, step, size, lim=0, prob=MAX, pos=MAX, overlapThresh = 0.5, probs=None, probs_area = 90):
 
     probs_area = int(probs_area / step)
@@ -248,41 +254,4 @@ def nms_felz(boxes, step, size, lim=0, prob=MAX, pos=MAX, overlapThresh = 0.5, p
         return np.array([])
     # return only the bounding boxes that were picked
     return np.vstack(pick)
-
-
-def nms_own(probs, minth, minpix, step, size, gauss=0):
-
-    if gauss != 0:
-        probs_img = filters.gaussian_filter(probs, gauss)
-    else:
-        probs_img=probs.copy()
-
-    probs_img[probs_img<minth] = 0
-    probs_img[probs_img>=minth] = 1
-    probs_img = ndimage.binary_dilation( ndimage.binary_erosion(probs_img)).astype(np.float64)
-    probs_img = ndimage.binary_erosion( ndimage.binary_dilation(probs_img)).astype(np.float64)
-
-    distance = ndimage.distance_transform_edt(probs_img)
-
-    local_maxi = peak_local_max(distance, min_distance=3, indices=False,labels=probs_img,exclude_border=False)
-    markers = measure.label(local_maxi, connectivity=2)
-    labels_ws = watershed(-distance, markers, mask=probs_img>minth)
-
-    found = []
-
-    #plt.imshow(labels_ws)
-    for i in range(1,len(labels_ws)+1):
-        if  sum( sum(labels_ws==i)) <= minpix:
-            labels_ws[labels_ws==i]=0
-        else:
-            _,y,x = np.where([labels_ws==i])
-
-            xm = (x.mean() +step) * step
-            ym = (y.mean() +step) * step
-
-            p = probs[ y.mean()- size/step/2 : y.mean()+size/step/2, x.mean()-size/step/2:x.mean()+size/step/2 ].flatten().mean()
-
-            if p > 0:
-                found.append((xm-size/2,ym-size/2,xm +size/2 ,ym+size/2, p))
-
-    return found
+'''
